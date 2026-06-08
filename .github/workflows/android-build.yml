@@ -1,7 +1,7 @@
 name: Build Android APK
 
 on:
-  workflow_dispatch:
+  workflow_dispatch:  # يمكنك تشغيله يدوياً
   push:
     branches: [ "main" ]
     paths:
@@ -21,145 +21,73 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
-      - name: Setup Gradle
+      - name: Setup Gradle (with wrapper generation)
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: 8.11.1
 
-      - name: Build with Gradle
+      - name: Build Android APK
         run: |
-          # ---------- 1. تحديد جذر المشروع ----------
-          # البحث عن settings.gradle في أي مجلد (بما في ذلك الجذر)
+          # ----------------------------------------------
+          # 1. البحث عن جذر مشروع Android (المجلد الذي يحتوي على settings.gradle)
+          # ----------------------------------------------
           PROJECT_ROOT=""
           for d in $(find . -name "settings.gradle" -o -name "settings.gradle.kts" | xargs dirname | sort -u); do
-            # التأكد من وجود وحدة تطبيق Android (com.android.application)
-            if find "$d" -type f -name "build.gradle" -o -name "build.gradle.kts" | xargs grep -l "com.android.application" >/dev/null 2>&1; then
+            echo "🔍 checking: $d"
+            # تحقق من وجود ملف build.gradle يطبق com.android.application داخل أي مجلد فرعي (مثل app)
+            if find "$d" -maxdepth 2 -name "build.gradle" -o -name "build.gradle.kts" | xargs grep -l "com.android.application" >/dev/null 2>&1; then
               PROJECT_ROOT="$d"
+              echo "✅ Found Android project at: $PROJECT_ROOT"
               break
             fi
           done
 
           if [ -z "$PROJECT_ROOT" ]; then
-            echo "::error::لم يتم العثور على مشروع Android صالح (يحتوي على settings.gradle ووحدة com.android.application)."
+            echo "::error::❌ لم يتم العثور على مشروع Android صالح (يحتوي على settings.gradle و com.android.application)."
             exit 1
           fi
 
-          echo "تم العثور على جذر المشروع: $PROJECT_ROOT"
           cd "$PROJECT_ROOT"
 
-          # ---------- 2. إعداد gradle.properties (AndroidX و Jetifier) ----------
-          if [ ! -f gradle.properties ]; then
-            touch gradle.properties
-          fi
-          if ! grep -q "android.useAndroidX" gradle.properties; then
-            echo "" >> gradle.properties
-            echo "android.useAndroidX=true" >> gradle.properties
-            echo "android.enableJetifier=true" >> gradle.properties
-          else
-            sed -i 's/android.useAndroidX=false/android.useAndroidX=true/g' gradle.properties
-          fi
-          if ! grep -q "android.enableJetifier" gradle.properties; then
-            echo "android.enableJetifier=true" >> gradle.properties
-          fi
-
-          # ---------- 3. التحقق من Gradle Wrapper ----------
-          TARGET_GRADLE_VERSION="8.11.1"
-          if [ -f gradle/wrapper/gradle-wrapper.properties ]; then
-            WRAPPER_VERSION=$(grep "distributionUrl" gradle/wrapper/gradle-wrapper.properties | sed -n 's/.*gradle-\([0-9.]*\)-.*/\1/p')
-            if [ -n "$WRAPPER_VERSION" ]; then
-              TARGET_GRADLE_VERSION="$WRAPPER_VERSION"
-              echo "تم العثور على إصدار Gradle في wrapper: $TARGET_GRADLE_VERSION"
-            fi
-          fi
-
+          # ----------------------------------------------
+          # 2. التأكد من وجود gradlew وتوليده إذا لزم الأمر
+          # ----------------------------------------------
           if [ ! -f gradlew ]; then
-            echo "⚠️ gradlew غير موجود. سيتم إنشاؤه..."
-            gradle wrapper --gradle-version "$TARGET_GRADLE_VERSION"
+            echo "📦 Gradle wrapper not found. Generating with version 8.11.1..."
+            gradle wrapper --gradle-version 8.11.1
             chmod +x gradlew
           fi
 
-          # ---------- 4. إزالة تكرارات الموارد ----------
-          echo "تشغيل أداة إزالة تكرارات الموارد..."
-          python3 -c "
-import os
-import xml.etree.ElementTree as ET
-
-res_values_dirs = []
-for root, dirs, files in os.walk('.'):
-    if 'res/values' in root.replace('\\\\', '/'):
-        res_values_dirs.append(root)
-
-for res_dir in res_values_dirs:
-    print(f'تنظيف التكرارات في: {res_dir}')
-    priorities = {
-        'color': 'colors.xml',
-        'string': 'strings.xml',
-        'style': 'themes.xml',
-        'dimen': 'dimens.xml'
-    }
-    files_data = {}
-    if os.path.exists(res_dir):
-        xml_files = [f for f in os.listdir(res_dir) if f.endswith('.xml')]
-    else:
-        xml_files = []
-    for f in xml_files:
-        path = os.path.join(res_dir, f)
-        try:
-            tree = ET.parse(path)
-            files_data[f] = (tree, tree.getroot())
-        except Exception as e:
-            print(f'خطأ في تحليل {f}: {e}')
-    seen = {}
-    # التسجيل الأولي للعناصر من الملفات ذات الأولوية
-    for f, (tree, root_elem) in files_data.items():
-        for child in list(root_elem):
-            name = child.attrib.get('name')
-            if not name:
-                continue
-            tag = child.tag
-            priority_file = priorities.get(tag)
-            if priority_file == f:
-                seen[(tag, name)] = f
-    # إزالة التكرارات
-    for f, (tree, root_elem) in list(files_data.items()):
-        modified = False
-        for child in list(root_elem):
-            name = child.attrib.get('name')
-            if not name:
-                continue
-            tag = child.tag
-            key = (tag, name)
-            if key in seen:
-                if seen[key] != f:
-                    print(f'إزالة {tag} مكرر \"{name}\" من {f} (موجود بالفعل في {seen[key]})')
-                    root_elem.remove(child)
-                    modified = True
-            else:
-                seen[key] = f
-        if modified:
-            try:
-                tree.write(os.path.join(res_dir, f), encoding='utf-8', xml_declaration=True)
-            except Exception as e:
-                print(f'فشل في كتابة {f}: {e}')
-"
-
-          # ---------- 5. بناء APK ----------
-          echo "بدء بناء APK..."
-          # استخدم المهمة الخاصة بوحدة :app إن وجدت، وإلا استخدم assembleDebug عادي
-          if ./gradlew tasks --all | grep -q ":app:assembleDebug"; then
-            echo "تم العثور على مهمة :app:assembleDebug، سيتم تشغيلها."
-            ./gradlew :app:assembleDebug --no-daemon
+          # ----------------------------------------------
+          # 3. تشغيل مهمة بناء APK (نستخدم :app:assembleDebug أو أول وحدة تطبيق)
+          # ----------------------------------------------
+          # البحث عن مسار وحدة التطبيق (مثل app أو android/app ...)
+          APP_MODULE_PATH=$(find . -name "build.gradle" -o -name "build.gradle.kts" | xargs grep -l "com.android.application" | head -1 | xargs dirname | sed 's|^\./||')
+          
+          if [ -n "$APP_MODULE_PATH" ]; then
+            echo "📱 Found application module at: $APP_MODULE_PATH"
+            TASK_NAME=":$APP_MODULE_PATH:assembleDebug"
+            echo "🚀 Running: ./gradlew $TASK_NAME"
+            ./gradlew $TASK_NAME --no-daemon
           else
-            echo "لم يتم العثور على :app:assembleDebug، سيتم تشغيل assembleDebug الافتراضية."
+            echo "::warning::⚠️ لم يتم العثور على وحدة تطبيق محددة. سنحاول استخدام assembleDebug الافتراضية."
             ./gradlew assembleDebug --no-daemon
           fi
 
-          # ---------- 6. جمع ملفات APK ----------
-          cd "${GITHUB_WORKSPACE}"
+          # ----------------------------------------------
+          # 4. جمع ملفات APK الناتجة (بغض النظر عن مكانها)
+          # ----------------------------------------------
+          cd "$GITHUB_WORKSPACE"
           mkdir -p apk-artifacts
           find "$PROJECT_ROOT" -name "*.apk" -type f -exec cp {} apk-artifacts/ \;
-          echo "تم نسخ ملفات APK إلى المجلد apk-artifacts:"
-          ls -la apk-artifacts/ || true
+          
+          if [ -z "$(ls -A apk-artifacts/)" ]; then
+            echo "::error::❌ لم يتم العثور على أي ملف APK بعد البناء."
+            exit 1
+          fi
+          
+          echo "✅ تم نسخ ملفات APK:"
+          ls -la apk-artifacts/
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
