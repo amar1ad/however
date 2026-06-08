@@ -27,25 +27,34 @@ jobs:
 
       - name: Build with Gradle
         run: |
-          # 1. Find the real Android project directory (where settings.gradle[.kts] exists)
-          PROJECT_DIR=""
-          for d in $(find . -name "settings.gradle" -o -name "settings.gradle.kts" | xargs dirname | sort -u); do
-            # Check if there is at least one module with com.android.application
-            if find "$d" -name "build.gradle" -o -name "build.gradle.kts" | xargs grep -l "com.android.application" >/dev/null 2>&1; then
-              PROJECT_DIR="$d"
-              break
-            fi
-          done
-
-          if [ -z "$PROJECT_DIR" ]; then
-            echo "ERROR: Could not find Android project directory with settings.gradle and an application module."
+          # --- 1. البحث الذكي عن جذر مشروع Android ---
+          # نبحث عن المجلد الذي يحتوي على settings.gradle (أو settings.gradle.kts) و app/build.gradle
+          PROJECT_ROOT=""
+          if [ -f "settings.gradle" ] || [ -f "settings.gradle.kts" ]; then
+            PROJECT_ROOT="."
+          else
+            # البحث في المجلدات الفرعية عن settings.gradle
+            for d in $(find . -name "settings.gradle" -o -name "settings.gradle.kts" | xargs dirname); do
+              if [ -f "$d/app/build.gradle" ] || [ -f "$d/app/build.gradle.kts" ]; then
+                PROJECT_ROOT="$d"
+                break
+              fi
+            done
+          fi
+          
+          if [ -z "$PROJECT_ROOT" ]; then
+            echo "::error::Could not find Android project root (no settings.gradle and app/build.gradle found)."
             exit 1
           fi
-
-          echo "Found Android project at: $PROJECT_DIR"
-          cd "$PROJECT_DIR"
-
-          # 2. Ensure gradle.properties has AndroidX and Jetifier
+          
+          echo "Found Android project at: $PROJECT_ROOT"
+          cd "$PROJECT_ROOT"
+          
+          # عرض محتويات المجلد للتأكد
+          echo "Contents of project root:"
+          ls -la
+          
+          # --- 2. إعداد gradle.properties (AndroidX و Jetifier) ---
           if [ ! -f gradle.properties ]; then
             touch gradle.properties
           fi
@@ -60,20 +69,23 @@ jobs:
             echo "android.enableJetifier=true" >> gradle.properties
           fi
 
-          # 3. Generate Gradle wrapper if needed (using detected version from existing wrapper or default)
+          # --- 3. التحقق من ملفات Gradle Wrapper وإنشاؤها إذا لزم الأمر ---
           TARGET_GRADLE_VERSION="8.11.1"
           if [ -f gradle/wrapper/gradle-wrapper.properties ]; then
             WRAPPER_VERSION=$(grep "distributionUrl" gradle/wrapper/gradle-wrapper.properties | sed -n 's/.*gradle-\([0-9.]*\)-.*/\1/p')
             if [ -n "$WRAPPER_VERSION" ]; then
               TARGET_GRADLE_VERSION="$WRAPPER_VERSION"
+              echo "Found wrapper version: $TARGET_GRADLE_VERSION"
             fi
           fi
+
           if [ ! -f gradlew ]; then
-            echo "Generating Gradle wrapper with version $TARGET_GRADLE_VERSION"
+            echo "Gradlew not found. Generating wrapper with version $TARGET_GRADLE_VERSION"
             gradle wrapper --gradle-version "$TARGET_GRADLE_VERSION"
+            chmod +x gradlew
           fi
 
-          # 4. Run Python resource deduplicator (fix duplicate XML definitions)
+          # --- 4. أداة إزالة تكرارات الموارد ---
           echo "Running resource deduplicator..."
           python3 -c "
 import os
@@ -138,14 +150,13 @@ for res_dir in res_values_dirs:
                 print(f'Failed to write {f}: {e}')
 "
 
-          # 5. Build debug APK
-          chmod +x gradlew
+          # --- 5. بناء APK ---
           ./gradlew assembleDebug --no-daemon
 
-          # 6. Collect all generated APKs
+          # --- 6. جمع APK الناتج ---
           cd "${GITHUB_WORKSPACE}"
           mkdir -p apk-artifacts
-          find "$PROJECT_DIR" -name "*.apk" -type f -exec cp {} apk-artifacts/ \;
+          find "$PROJECT_ROOT" -name "*.apk" -type f -exec cp {} apk-artifacts/ \;
           echo "APK files copied to apk-artifacts:"
           ls -la apk-artifacts/ || true
 
