@@ -10,6 +10,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -27,34 +28,26 @@ jobs:
 
       - name: Build with Gradle
         run: |
-          # --- 1. البحث الذكي عن جذر مشروع Android ---
-          # نبحث عن المجلد الذي يحتوي على settings.gradle (أو settings.gradle.kts) و app/build.gradle
+          # ---------- 1. تحديد جذر المشروع ----------
+          # البحث عن settings.gradle في أي مجلد (بما في ذلك الجذر)
           PROJECT_ROOT=""
-          if [ -f "settings.gradle" ] || [ -f "settings.gradle.kts" ]; then
-            PROJECT_ROOT="."
-          else
-            # البحث في المجلدات الفرعية عن settings.gradle
-            for d in $(find . -name "settings.gradle" -o -name "settings.gradle.kts" | xargs dirname); do
-              if [ -f "$d/app/build.gradle" ] || [ -f "$d/app/build.gradle.kts" ]; then
-                PROJECT_ROOT="$d"
-                break
-              fi
-            done
-          fi
-          
+          for d in $(find . -name "settings.gradle" -o -name "settings.gradle.kts" | xargs dirname | sort -u); do
+            # التأكد من وجود وحدة تطبيق Android (com.android.application)
+            if find "$d" -type f -name "build.gradle" -o -name "build.gradle.kts" | xargs grep -l "com.android.application" >/dev/null 2>&1; then
+              PROJECT_ROOT="$d"
+              break
+            fi
+          done
+
           if [ -z "$PROJECT_ROOT" ]; then
-            echo "::error::Could not find Android project root (no settings.gradle and app/build.gradle found)."
+            echo "::error::لم يتم العثور على مشروع Android صالح (يحتوي على settings.gradle ووحدة com.android.application)."
             exit 1
           fi
-          
-          echo "Found Android project at: $PROJECT_ROOT"
+
+          echo "تم العثور على جذر المشروع: $PROJECT_ROOT"
           cd "$PROJECT_ROOT"
-          
-          # عرض محتويات المجلد للتأكد
-          echo "Contents of project root:"
-          ls -la
-          
-          # --- 2. إعداد gradle.properties (AndroidX و Jetifier) ---
+
+          # ---------- 2. إعداد gradle.properties (AndroidX و Jetifier) ----------
           if [ ! -f gradle.properties ]; then
             touch gradle.properties
           fi
@@ -69,24 +62,24 @@ jobs:
             echo "android.enableJetifier=true" >> gradle.properties
           fi
 
-          # --- 3. التحقق من ملفات Gradle Wrapper وإنشاؤها إذا لزم الأمر ---
+          # ---------- 3. التحقق من Gradle Wrapper ----------
           TARGET_GRADLE_VERSION="8.11.1"
           if [ -f gradle/wrapper/gradle-wrapper.properties ]; then
             WRAPPER_VERSION=$(grep "distributionUrl" gradle/wrapper/gradle-wrapper.properties | sed -n 's/.*gradle-\([0-9.]*\)-.*/\1/p')
             if [ -n "$WRAPPER_VERSION" ]; then
               TARGET_GRADLE_VERSION="$WRAPPER_VERSION"
-              echo "Found wrapper version: $TARGET_GRADLE_VERSION"
+              echo "تم العثور على إصدار Gradle في wrapper: $TARGET_GRADLE_VERSION"
             fi
           fi
 
           if [ ! -f gradlew ]; then
-            echo "Gradlew not found. Generating wrapper with version $TARGET_GRADLE_VERSION"
+            echo "⚠️ gradlew غير موجود. سيتم إنشاؤه..."
             gradle wrapper --gradle-version "$TARGET_GRADLE_VERSION"
             chmod +x gradlew
           fi
 
-          # --- 4. أداة إزالة تكرارات الموارد ---
-          echo "Running resource deduplicator..."
+          # ---------- 4. إزالة تكرارات الموارد ----------
+          echo "تشغيل أداة إزالة تكرارات الموارد..."
           python3 -c "
 import os
 import xml.etree.ElementTree as ET
@@ -97,7 +90,7 @@ for root, dirs, files in os.walk('.'):
         res_values_dirs.append(root)
 
 for res_dir in res_values_dirs:
-    print(f'Cleaning duplicates in: {res_dir}')
+    print(f'تنظيف التكرارات في: {res_dir}')
     priorities = {
         'color': 'colors.xml',
         'string': 'strings.xml',
@@ -115,9 +108,9 @@ for res_dir in res_values_dirs:
             tree = ET.parse(path)
             files_data[f] = (tree, tree.getroot())
         except Exception as e:
-            print(f'Error parsing {f}: {e}')
+            print(f'خطأ في تحليل {f}: {e}')
     seen = {}
-    # First pass: register items from priority files
+    # التسجيل الأولي للعناصر من الملفات ذات الأولوية
     for f, (tree, root_elem) in files_data.items():
         for child in list(root_elem):
             name = child.attrib.get('name')
@@ -127,7 +120,7 @@ for res_dir in res_values_dirs:
             priority_file = priorities.get(tag)
             if priority_file == f:
                 seen[(tag, name)] = f
-    # Second pass: remove duplicates
+    # إزالة التكرارات
     for f, (tree, root_elem) in list(files_data.items()):
         modified = False
         for child in list(root_elem):
@@ -138,7 +131,7 @@ for res_dir in res_values_dirs:
             key = (tag, name)
             if key in seen:
                 if seen[key] != f:
-                    print(f'Removing duplicate {tag} \"{name}\" from {f} (already in {seen[key]})')
+                    print(f'إزالة {tag} مكرر \"{name}\" من {f} (موجود بالفعل في {seen[key]})')
                     root_elem.remove(child)
                     modified = True
             else:
@@ -147,17 +140,25 @@ for res_dir in res_values_dirs:
             try:
                 tree.write(os.path.join(res_dir, f), encoding='utf-8', xml_declaration=True)
             except Exception as e:
-                print(f'Failed to write {f}: {e}')
+                print(f'فشل في كتابة {f}: {e}')
 "
 
-          # --- 5. بناء APK ---
-          ./gradlew assembleDebug --no-daemon
+          # ---------- 5. بناء APK ----------
+          echo "بدء بناء APK..."
+          # استخدم المهمة الخاصة بوحدة :app إن وجدت، وإلا استخدم assembleDebug عادي
+          if ./gradlew tasks --all | grep -q ":app:assembleDebug"; then
+            echo "تم العثور على مهمة :app:assembleDebug، سيتم تشغيلها."
+            ./gradlew :app:assembleDebug --no-daemon
+          else
+            echo "لم يتم العثور على :app:assembleDebug، سيتم تشغيل assembleDebug الافتراضية."
+            ./gradlew assembleDebug --no-daemon
+          fi
 
-          # --- 6. جمع APK الناتج ---
+          # ---------- 6. جمع ملفات APK ----------
           cd "${GITHUB_WORKSPACE}"
           mkdir -p apk-artifacts
           find "$PROJECT_ROOT" -name "*.apk" -type f -exec cp {} apk-artifacts/ \;
-          echo "APK files copied to apk-artifacts:"
+          echo "تم نسخ ملفات APK إلى المجلد apk-artifacts:"
           ls -la apk-artifacts/ || true
 
       - name: Upload APK
