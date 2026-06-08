@@ -1,7 +1,7 @@
 name: Build Android APK
 
 on:
-  workflow_dispatch:  # يمكنك تشغيله يدوياً
+  workflow_dispatch:
   push:
     branches: [ "main" ]
     paths:
@@ -21,36 +21,37 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
-      - name: Setup Gradle (with wrapper generation)
+      - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: 8.11.1
 
-      - name: Build Android APK
+      - name: Fix settings.gradle and build APK
         run: |
           # ----------------------------------------------
-          # 1. البحث عن جذر مشروع Android (المجلد الذي يحتوي على settings.gradle)
+          # 1. إصلاح ملف settings.gradle إذا كان فارغاً أو مفقوداً
           # ----------------------------------------------
-          PROJECT_ROOT=""
-          for d in $(find . -name "settings.gradle" -o -name "settings.gradle.kts" | xargs dirname | sort -u); do
-            echo "🔍 checking: $d"
-            # تحقق من وجود ملف build.gradle يطبق com.android.application داخل أي مجلد فرعي (مثل app)
-            if find "$d" -maxdepth 2 -name "build.gradle" -o -name "build.gradle.kts" | xargs grep -l "com.android.application" >/dev/null 2>&1; then
-              PROJECT_ROOT="$d"
-              echo "✅ Found Android project at: $PROJECT_ROOT"
-              break
+          if [ ! -f settings.gradle ] && [ ! -f settings.gradle.kts ]; then
+            echo "⚠️ settings.gradle غير موجود. سيتم إنشاؤه."
+            echo "include ':app'" > settings.gradle
+          elif [ ! -s settings.gradle ] && [ ! -s settings.gradle.kts ]; then
+            echo "⚠️ settings.gradle موجود لكنه فارغ. سيتم إضافة المحتوى الأساسي."
+            echo "include ':app'" > settings.gradle
+          else
+            echo "✅ settings.gradle موجود وغير فارغ."
+            # تأكد من أنه يحتوي على include ':app' (أضفه إذا لم يكن موجوداً)
+            if ! grep -q "include.*:app" settings.gradle 2>/dev/null && ! grep -q "include.*:app" settings.gradle.kts 2>/dev/null; then
+              echo "⚠️ settings.gradle لا يحتوي على 'include ':app''. سيتم إضافته."
+              echo "" >> settings.gradle
+              echo "include ':app'" >> settings.gradle
             fi
-          done
-
-          if [ -z "$PROJECT_ROOT" ]; then
-            echo "::error::❌ لم يتم العثور على مشروع Android صالح (يحتوي على settings.gradle و com.android.application)."
-            exit 1
           fi
 
-          cd "$PROJECT_ROOT"
+          echo "=== محتوى settings.gradle بعد الإصلاح ==="
+          cat settings.gradle 2>/dev/null || cat settings.gradle.kts 2>/dev/null
 
           # ----------------------------------------------
-          # 2. التأكد من وجود gradlew وتوليده إذا لزم الأمر
+          # 2. إنشاء gradlew إذا لم يكن موجوداً
           # ----------------------------------------------
           if [ ! -f gradlew ]; then
             echo "📦 Gradle wrapper not found. Generating with version 8.11.1..."
@@ -59,33 +60,21 @@ jobs:
           fi
 
           # ----------------------------------------------
-          # 3. تشغيل مهمة بناء APK (نستخدم :app:assembleDebug أو أول وحدة تطبيق)
+          # 3. بناء APK (مباشرة باستخدام :app:assembleDebug)
           # ----------------------------------------------
-          # البحث عن مسار وحدة التطبيق (مثل app أو android/app ...)
-          APP_MODULE_PATH=$(find . -name "build.gradle" -o -name "build.gradle.kts" | xargs grep -l "com.android.application" | head -1 | xargs dirname | sed 's|^\./||')
-          
-          if [ -n "$APP_MODULE_PATH" ]; then
-            echo "📱 Found application module at: $APP_MODULE_PATH"
-            TASK_NAME=":$APP_MODULE_PATH:assembleDebug"
-            echo "🚀 Running: ./gradlew $TASK_NAME"
-            ./gradlew $TASK_NAME --no-daemon
-          else
-            echo "::warning::⚠️ لم يتم العثور على وحدة تطبيق محددة. سنحاول استخدام assembleDebug الافتراضية."
-            ./gradlew assembleDebug --no-daemon
-          fi
+          echo "🚀 Building APK..."
+          ./gradlew :app:assembleDebug --no-daemon
 
           # ----------------------------------------------
-          # 4. جمع ملفات APK الناتجة (بغض النظر عن مكانها)
+          # 4. جمع ملف APK الناتج
           # ----------------------------------------------
-          cd "$GITHUB_WORKSPACE"
           mkdir -p apk-artifacts
-          find "$PROJECT_ROOT" -name "*.apk" -type f -exec cp {} apk-artifacts/ \;
-          
+          find . -path "*/app/build/outputs/apk/debug/*.apk" -exec cp {} apk-artifacts/ \;
+
           if [ -z "$(ls -A apk-artifacts/)" ]; then
-            echo "::error::❌ لم يتم العثور على أي ملف APK بعد البناء."
+            echo "::error::❌ لم يتم العثور على ملف APK بعد البناء."
             exit 1
           fi
-          
           echo "✅ تم نسخ ملفات APK:"
           ls -la apk-artifacts/
 
