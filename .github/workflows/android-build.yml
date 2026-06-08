@@ -26,56 +26,117 @@ jobs:
         with:
           gradle-version: 8.11.1
 
-      - name: Fix settings.gradle and build APK
+      - name: Fix settings.gradle and build
         run: |
-          # ----------------------------------------------
-          # 1. إصلاح ملف settings.gradle إذا كان فارغاً أو مفقوداً
-          # ----------------------------------------------
-          if [ ! -f settings.gradle ] && [ ! -f settings.gradle.kts ]; then
-            echo "⚠️ settings.gradle غير موجود. سيتم إنشاؤه."
-            echo "include ':app'" > settings.gradle
-          elif [ ! -s settings.gradle ] && [ ! -s settings.gradle.kts ]; then
-            echo "⚠️ settings.gradle موجود لكنه فارغ. سيتم إضافة المحتوى الأساسي."
-            echo "include ':app'" > settings.gradle
-          else
-            echo "✅ settings.gradle موجود وغير فارغ."
-            # تأكد من أنه يحتوي على include ':app' (أضفه إذا لم يكن موجوداً)
-            if ! grep -q "include.*:app" settings.gradle 2>/dev/null && ! grep -q "include.*:app" settings.gradle.kts 2>/dev/null; then
-              echo "⚠️ settings.gradle لا يحتوي على 'include ':app''. سيتم إضافته."
-              echo "" >> settings.gradle
-              echo "include ':app'" >> settings.gradle
-            fi
+          # ---------------------------
+          # 1. إصلاح settings.gradle الفارغ
+          # ---------------------------
+          if [ ! -s settings.gradle ] && [ ! -s settings.gradle.kts ]; then
+            echo "الملف settings.gradle فارغ أو مفقود. سنقوم بإنشاء محتواه."
+            cat > settings.gradle << 'EOF'
+rootProject.name = "however"
+include ':app'
+EOF
+            echo "✅ تم إنشاء settings.gradle مع include ':app'"
           fi
+          
+          # عرض محتوى settings.gradle للتأكد
+          echo "=== محتوى settings.gradle ==="
+          cat settings.gradle || cat settings.gradle.kts
 
-          echo "=== محتوى settings.gradle بعد الإصلاح ==="
-          cat settings.gradle 2>/dev/null || cat settings.gradle.kts 2>/dev/null
-
-          # ----------------------------------------------
-          # 2. إنشاء gradlew إذا لم يكن موجوداً
-          # ----------------------------------------------
+          # ---------------------------
+          # 2. إنشاء Gradle wrapper إذا لم يكن موجوداً
+          # ---------------------------
           if [ ! -f gradlew ]; then
-            echo "📦 Gradle wrapper not found. Generating with version 8.11.1..."
+            echo "Gradle wrapper غير موجود، سيتم إنشاؤه..."
             gradle wrapper --gradle-version 8.11.1
             chmod +x gradlew
           fi
 
-          # ----------------------------------------------
-          # 3. بناء APK (مباشرة باستخدام :app:assembleDebug)
-          # ----------------------------------------------
-          echo "🚀 Building APK..."
+          # ---------------------------
+          # 3. تشغيل سكريبت إزالة التكرارات (الذي أرفقته)
+          # ---------------------------
+          echo "تشغيل أداة إصلاح تكرارات الموارد..."
+          python3 -c "
+import os
+import xml.etree.ElementTree as ET
+
+def fix_duplicates():
+    base_path = os.path.join('app', 'src', 'main', 'res', 'values')
+    colors_path = os.path.join(base_path, 'colors.xml')
+    styles_path = os.path.join(base_path, 'styles.xml')
+    themes_path = os.path.join(base_path, 'themes.xml')
+
+    print('=== بدء فحص وإصلاح ملفات الموارد ===')
+    color_names_in_colors = set()
+    if os.path.exists(colors_path):
+        try:
+            tree = ET.parse(colors_path)
+            root = tree.getroot()
+            for color in root.findall('color'):
+                name = color.get('name')
+                if name:
+                    color_names_in_colors.add(name)
+            print(f'[معلومة] تم العثور على {len(color_names_in_colors)} لون في colors.xml')
+        except Exception as e:
+            print(f'[خطأ] تعذر قراءة colors.xml: {e}')
+    else:
+        print('[تحذير] colors.xml غير موجود')
+
+    if os.path.exists(styles_path):
+        try:
+            ET.register_namespace('tools', 'http://schemas.android.com/tools')
+            tree = ET.parse(styles_path)
+            root = tree.getroot()
+            removed_colors_count = 0
+            removed_themes_count = 0
+            elements_to_remove = []
+            for color in root.findall('color'):
+                name = color.get('name')
+                if name in color_names_in_colors:
+                    elements_to_remove.append(color)
+                    removed_colors_count += 1
+            if os.path.exists(themes_path):
+                for style in root.findall('style'):
+                    if style.get('name') == 'AppTheme':
+                        elements_to_remove.append(style)
+                        removed_themes_count += 1
+            for elem in elements_to_remove:
+                root.remove(elem)
+            if removed_colors_count > 0 or removed_themes_count > 0:
+                tree.write(styles_path, encoding='utf-8', xml_declaration=True)
+                print(f'[نجاح] تم تحديث styles.xml: حذف {removed_colors_count} لون و {removed_themes_count} ثيم')
+            else:
+                print('[معلومة] styles.xml لا يحتوي على تكرارات')
+        except Exception as e:
+            print(f'[خطأ] أثناء تعديل styles.xml: {e}')
+    else:
+        print('[تحذير] styles.xml غير موجود')
+    print('=== انتهت العملية بنجاح ===')
+
+if __name__ == '__main__':
+    if os.path.exists('app'):
+        fix_duplicates()
+    else:
+        print('[خطأ] مجلد app غير موجود')
+"
+
+          # ---------------------------
+          # 4. بناء APK
+          # ---------------------------
+          echo "بدء بناء APK..."
           ./gradlew :app:assembleDebug --no-daemon
 
-          # ----------------------------------------------
-          # 4. جمع ملف APK الناتج
-          # ----------------------------------------------
+          # ---------------------------
+          # 5. جمع APK الناتج
+          # ---------------------------
           mkdir -p apk-artifacts
           find . -path "*/app/build/outputs/apk/debug/*.apk" -exec cp {} apk-artifacts/ \;
-
-          if [ -z "$(ls -A apk-artifacts/)" ]; then
-            echo "::error::❌ لم يتم العثور على ملف APK بعد البناء."
+          if [ -z "$(ls -A apk-artifacts/ 2>/dev/null)" ]; then
+            echo "::error::❌ لم يتم العثور على APK - فشل البناء"
             exit 1
           fi
-          echo "✅ تم نسخ ملفات APK:"
+          echo "✅ تم العثور على APK:"
           ls -la apk-artifacts/
 
       - name: Upload APK
